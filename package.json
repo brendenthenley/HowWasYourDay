@@ -1,0 +1,15 @@
+{
+  "name": "daily-photos",
+  "version": "1.0.0",
+  "description": "Upload photos from your day, then browse them grouped by day.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "cookie-parser": "^1.4.6",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "multer": "^2.0.0"
+  }
+}

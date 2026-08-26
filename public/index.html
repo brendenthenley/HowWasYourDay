@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Daily Photos — Upload</title>
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>Daily Photos</h1>
+    <nav class="tabs">
+      <a href="/" class="active">Upload</a>
+      <a href="/gallery.html">Gallery</a>
+    </nav>
+  </header>
+
+  <div class="container">
+    <div class="upload-zone">
+      <strong>Add photos from today</strong>
+      <p style="margin:8px 0 0;">Take a new photo or pick some from your library.</p>
+    </div>
+
+    <div style="display:flex; gap:10px; margin-bottom:16px;">
+      <button id="btn-camera" type="button">📷 Take Photo</button>
+      <button id="btn-library" type="button" style="background:#2a2e37;">🖼️ Choose Photos</button>
+    </div>
+
+    <input type="file" id="input-camera" class="hidden-file-input" accept="image/*" capture="environment" />
+    <input type="file" id="input-library" class="hidden-file-input" accept="image/*" multiple />
+
+    <div class="preview-grid" id="preview-grid"></div>
+
+    <button id="btn-upload" style="display:none;">Upload</button>
+    <div class="status-text" id="status"></div>
+  </div>
+
+<script>
+  let selectedFiles = [];
+
+  const previewGrid = document.getElementById('preview-grid');
+  const uploadBtn = document.getElementById('btn-upload');
+  const statusEl = document.getElementById('status');
+
+  function renderPreviews() {
+    previewGrid.innerHTML = '';
+    for (const file of selectedFiles) {
+      const img = document.createElement('img');
+      img.src = URL.createObjectURL(file);
+      previewGrid.appendChild(img);
+    }
+    uploadBtn.style.display = selectedFiles.length ? 'block' : 'none';
+  }
+
+  function addFiles(fileList) {
+    for (const f of fileList) {
+      if (f.type.startsWith('image/')) selectedFiles.push(f);
+    }
+    renderPreviews();
+  }
+
+  document.getElementById('btn-camera').addEventListener('click', () => {
+    document.getElementById('input-camera').click();
+  });
+  document.getElementById('btn-library').addEventListener('click', () => {
+    document.getElementById('input-library').click();
+  });
+
+  document.getElementById('input-camera').addEventListener('change', (e) => {
+    addFiles(e.target.files);
+    e.target.value = '';
+  });
+  document.getElementById('input-library').addEventListener('change', (e) => {
+    addFiles(e.target.files);
+    e.target.value = '';
+  });
+
+  function localDateString() {
+    const d = new Date();
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}`;
+  }
+
+  uploadBtn.addEventListener('click', async () => {
+    if (!selectedFiles.length) return;
+    uploadBtn.disabled = true;
+    statusEl.textContent = `Uploading ${selectedFiles.length} photo(s)...`;
+
+    const formData = new FormData();
+    formData.append('date', localDateString());
+    for (const f of selectedFiles) formData.append('photos', f);
+
+    try {
+      const res = await fetch('/api/upload', { method: 'POST', body: formData });
+      if (!res.ok) throw new Error('upload failed');
+      const data = await res.json();
+      statusEl.textContent = `Added ${data.count} photo(s) to today. View them in the Gallery.`;
+      selectedFiles = [];
+      renderPreviews();
+    } catch (err) {
+      statusEl.textContent = 'Something went wrong. Try again.';
+    } finally {
+      uploadBtn.disabled = false;
+    }
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Daily Photos — Gallery</title>
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>Daily Photos</h1>
+    <nav class="tabs">
+      <a href="/">Upload</a>
+      <a href="/gallery.html" class="active">Gallery</a>
+    </nav>
+  </header>
+
+  <div class="container">
+    <div class="day-list" id="day-list"></div>
+    <div id="grid-wrap">
+      <div class="photo-grid" id="photo-grid"></div>
+    </div>
+  </div>
+
+  <div class="lightbox" id="lightbox">
+    <button class="lightbox-close" id="lightbox-close">✕</button>
+    <img id="lightbox-img" src="" alt="" />
+  </div>
+
+<script>
+  function localDateString(d = new Date()) {
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}`;
+  }
+
+  function friendlyLabel(dateStr, todayStr, yesterdayStr) {
+    if (dateStr === todayStr) return 'Today';
+    if (dateStr === yesterdayStr) return 'Yesterday';
+    const [y, m, d] = dateStr.split('-').map(Number);
+    const date = new Date(y, m - 1, d);
+    return date.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+  }
+
+  const dayListEl = document.getElementById('day-list');
+  const photoGridEl = document.getElementById('photo-grid');
+  const lightbox = document.getElementById('lightbox');
+  const lightboxImg = document.getElementById('lightbox-img');
+
+  document.getElementById('lightbox-close').addEventListener('click', () => lightbox.classList.remove('open'));
+  lightbox.addEventListener('click', (e) => { if (e.target === lightbox) lightbox.classList.remove('open'); });
+
+  async function loadPhotos(date) {
+    document.querySelectorAll('.day-pill').forEach((el) => {
+      el.classList.toggle('active', el.dataset.date === date);
+    });
+    const res = await fetch(`/api/photos/${date}`);
+    const data = await res.json();
+    photoGridEl.innerHTML = '';
+    if (!data.photos.length) {
+      photoGridEl.outerHTML = '<div class="empty-state" id="photo-grid-empty">No photos yet for this day.</div>';
+      return;
+    }
+    if (!document.getElementById('photo-grid')) {
+      document.getElementById('photo-grid-empty').outerHTML = '<div class="photo-grid" id="photo-grid"></div>';
+    }
+    const grid = document.getElementById('photo-grid');
+    for (const p of data.photos) {
+      const img = document.createElement('img');
+      img.src = p.url;
+      img.loading = 'lazy';
+      img.addEventListener('click', () => {
+        lightboxImg.src = p.url;
+        lightbox.classList.add('open');
+      });
+      grid.appendChild(img);
+    }
+  }
+
+  async function init() {
+    const today = localDateString();
+    const yesterday = localDateString(new Date(Date.now() - 86400000));
+
+    const res = await fetch('/api/days');
+    const data = await res.json();
+    let days = data.days.map((d) => d.date);
+    if (!days.includes(today)) days = [today, ...days];
+
+    dayListEl.innerHTML = '';
+    for (const date of days) {
+      const pill = document.createElement('div');
+      pill.className = 'day-pill';
+      pill.dataset.date = date;
+      pill.textContent = friendlyLabel(date, today, yesterday);
+      pill.addEventListener('click', () => loadPhotos(date));
+      dayListEl.appendChild(pill);
+    }
+    loadPhotos(today);
+  }
+
+  init();
+</script>
+</body>
+</html>
