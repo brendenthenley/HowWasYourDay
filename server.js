@@ -2,33 +2,33 @@ require('dotenv').config();
 const express = require('express');
 const multer = require('multer');
 const cookieParser = require('cookie-parser');
-const crypto = require('crypto');
-const fs = require('fs');
 const path = require('path');
+const cloudinary = require('cloudinary').v2;
 
 const PORT = process.env.PORT || 3000;
 const PASSCODE = process.env.PASSCODE || 'changeme';
 const COOKIE_SECRET = process.env.COOKIE_SECRET || 'dev-secret-change-me';
 const IS_PROD = process.env.NODE_ENV === 'production';
-
-const DATA_DIR = path.join(__dirname, 'data');
-const UPLOADS_DIR = path.join(__dirname, 'uploads');
-const DB_FILE = path.join(DATA_DIR, 'db.json');
+const RETENTION_DAYS = parseInt(process.env.RETENTION_DAYS || '7', 10);
+const ROOT_FOLDER = 'daily-photos';
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
-for (const dir of [DATA_DIR, UPLOADS_DIR]) {
-  fs.mkdirSync(dir, { recursive: true });
-}
-if (!fs.existsSync(DB_FILE)) {
-  fs.writeFileSync(DB_FILE, JSON.stringify({ photos: [] }, null, 2));
-}
+const CLOUDINARY_CONFIGURED = Boolean(
+  process.env.CLOUDINARY_URL ||
+    (process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET)
+);
 
-function readDB() {
-  return JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
+if (!CLOUDINARY_CONFIGURED) {
+  console.warn('WARNING: Cloudinary is not configured. Uploads will fail until it is.');
+} else if (!process.env.CLOUDINARY_URL) {
+  // Not using the combined CLOUDINARY_URL var, so configure from the separate pieces.
+  cloudinary.config({
+    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+    api_key: process.env.CLOUDINARY_API_KEY,
+    api_secret: process.env.CLOUDINARY_API_SECRET,
+  });
 }
-function writeDB(db) {
-  fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
-}
+// If CLOUDINARY_URL is set, cloudinary.v2 auto-configures itself from it.
 
 const app = express();
 app.set('trust proxy', 1);
@@ -74,120 +74,106 @@ app.use(requireAuth);
 
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Serve uploaded photo files (protected)
-app.get('/photos/:date/:filename', (req, res) => {
-  const { date, filename } = req.params;
-  if (!DATE_RE.test(date) || filename.includes('..') || filename.includes('/')) {
-    return res.status(400).end();
-  }
-  const filePath = path.join(UPLOADS_DIR, date, filename);
-  res.sendFile(filePath, (err) => {
-    if (err && !res.headersSent) res.status(404).end();
-  });
-});
-
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    const date = DATE_RE.test(req.body.date) ? req.body.date : new Date().toISOString().slice(0, 10);
-    const dir = path.join(UPLOADS_DIR, date);
-    fs.mkdirSync(dir, { recursive: true });
-    req._uploadDate = date;
-    cb(null, dir);
-  },
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname) || '.jpg';
-    cb(null, `${crypto.randomUUID()}${ext}`);
-  },
-});
 const upload = multer({
-  storage,
+  storage: multer.memoryStorage(),
   limits: { fileSize: 20 * 1024 * 1024, files: 30 },
   fileFilter: (req, file, cb) => {
     cb(null, file.mimetype.startsWith('image/'));
   },
 });
 
-app.post('/api/upload', upload.array('photos', 30), (req, res) => {
+function uploadBufferToCloudinary(buffer, folder) {
+  return new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(
+      { folder, resource_type: 'image' },
+      (err, result) => (err ? reject(err) : resolve(result))
+    );
+    stream.end(buffer);
+  });
+}
+
+app.post('/api/upload', upload.array('photos', 30), async (req, res) => {
   const files = req.files || [];
   if (files.length === 0) return res.status(400).json({ error: 'no images received' });
 
-  const date = req._uploadDate;
-  const db = readDB();
-  const now = new Date().toISOString();
-  const created = files.map((f) => {
-    const record = {
-      id: crypto.randomUUID(),
-      date,
-      filename: f.filename,
-      originalName: f.originalname,
-      uploadedAt: now,
-    };
-    db.photos.push(record);
-    return record;
-  });
-  writeDB(db);
-  res.json({ ok: true, count: created.length });
+  const date = DATE_RE.test(req.body.date) ? req.body.date : new Date().toISOString().slice(0, 10);
+  const folder = `${ROOT_FOLDER}/${date}`;
+
+  try {
+    await Promise.all(files.map((f) => uploadBufferToCloudinary(f.buffer, folder)));
+    res.json({ ok: true, count: files.length });
+  } catch (err) {
+    console.error('Cloudinary upload failed:', err.message);
+    res.status(502).json({ error: 'upload to storage failed' });
+  }
 });
 
-app.get('/api/days', (req, res) => {
-  const db = readDB();
-  const counts = {};
-  for (const p of db.photos) counts[p.date] = (counts[p.date] || 0) + 1;
-  const days = Object.entries(counts)
-    .map(([date, count]) => ({ date, count }))
-    .sort((a, b) => (a.date < b.date ? 1 : -1));
-  res.json({ days });
+app.get('/api/days', async (req, res) => {
+  try {
+    const { folders } = await cloudinary.api.sub_folders(ROOT_FOLDER).catch(() => ({ folders: [] }));
+    const days = await Promise.all(
+      folders
+        .filter((f) => DATE_RE.test(f.name))
+        .map(async (f) => {
+          const result = await cloudinary.search
+            .expression(`folder:"${f.path}"`)
+            .max_results(1)
+            .execute();
+          return { date: f.name, count: result.total_count };
+        })
+    );
+    days.sort((a, b) => (a.date < b.date ? 1 : -1));
+    res.json({ days: days.filter((d) => d.count > 0) });
+  } catch (err) {
+    console.error('Failed to list days:', err.message);
+    res.status(502).json({ error: 'failed to reach photo storage' });
+  }
 });
 
-app.get('/api/photos/:date', (req, res) => {
+app.get('/api/photos/:date', async (req, res) => {
   const { date } = req.params;
   if (!DATE_RE.test(date)) return res.status(400).json({ error: 'bad date' });
-  const db = readDB();
-  const photos = db.photos
-    .filter((p) => p.date === date)
-    .sort((a, b) => (a.uploadedAt < b.uploadedAt ? -1 : 1))
-    .map((p) => ({
-      id: p.id,
-      url: `/photos/${p.date}/${p.filename}`,
-      originalName: p.originalName,
-      uploadedAt: p.uploadedAt,
+  try {
+    const result = await cloudinary.search
+      .expression(`folder:"${ROOT_FOLDER}/${date}"`)
+      .sort_by('created_at', 'asc')
+      .max_results(500)
+      .execute();
+    const photos = (result.resources || []).map((r) => ({
+      id: r.asset_id,
+      url: r.secure_url,
+      uploadedAt: r.created_at,
     }));
-  res.json({ date, photos });
+    res.json({ date, photos });
+  } catch (err) {
+    console.error('Failed to list photos:', err.message);
+    res.status(502).json({ error: 'failed to reach photo storage' });
+  }
 });
 
-const RETENTION_DAYS = parseInt(process.env.RETENTION_DAYS || '7', 10);
+async function cleanupOldPhotos() {
+  try {
+    const { folders } = await cloudinary.api.sub_folders(ROOT_FOLDER).catch(() => ({ folders: [] }));
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - RETENTION_DAYS);
+    const cutoffStr = cutoff.toISOString().slice(0, 10);
 
-function cleanupOldPhotos() {
-  const db = readDB();
-  const cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - RETENTION_DAYS);
-  const cutoffStr = cutoff.toISOString().slice(0, 10);
-
-  const keep = [];
-  const staleDates = new Set();
-  for (const p of db.photos) {
-    if (p.date < cutoffStr) {
-      staleDates.add(p.date);
-      fs.unlink(path.join(UPLOADS_DIR, p.date, p.filename), () => {});
-    } else {
-      keep.push(p);
+    for (const f of folders) {
+      if (DATE_RE.test(f.name) && f.name < cutoffStr) {
+        await cloudinary.api.delete_resources_by_prefix(`${f.path}/`);
+        await cloudinary.api.delete_folder(f.path).catch(() => {});
+        console.log(`Cleaned up photos for ${f.name}`);
+      }
     }
+  } catch (err) {
+    console.error('Cleanup failed:', err.message);
   }
-
-  if (keep.length === db.photos.length) return;
-  db.photos = keep;
-  writeDB(db);
-  for (const date of staleDates) {
-    const dir = path.join(UPLOADS_DIR, date);
-    fs.readdir(dir, (err, files) => {
-      if (!err && files.length === 0) fs.rmdir(dir, () => {});
-    });
-  }
-  console.log(`Cleaned up photos older than ${cutoffStr}`);
 }
 
-cleanupOldPhotos();
-setInterval(cleanupOldPhotos, 6 * 60 * 60 * 1000); // recheck every 6 hours
+if (CLOUDINARY_CONFIGURED) {
+  cleanupOldPhotos();
+  setInterval(cleanupOldPhotos, 6 * 60 * 60 * 1000); // recheck every 6 hours
+}
 
 app.listen(PORT, () => {
   console.log(`Daily Photos running at http://localhost:${PORT}`);
